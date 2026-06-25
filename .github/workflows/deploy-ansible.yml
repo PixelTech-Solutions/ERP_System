@@ -3,6 +3,8 @@ name: "Deploy ERP (Ansible)"
 # Builds the backend JAR and deploys the full app to already-provisioned
 # servers using Ansible. Trigger manually after the infrastructure
 # (ERP_Infra) Terraform Apply has created the servers.
+#
+# Pipeline:  build  ->  configure-database  ->  deploy-application  ->  smoke-test
 
 on:
   workflow_dispatch:
@@ -26,7 +28,9 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  # 1) Compile and package the Spring Boot backend, publish the JAR as an artifact.
+  build:
+    name: Build backend JAR
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -39,14 +43,25 @@ jobs:
           java-version: "17"
           cache: maven
 
-      - name: Build backend JAR
+      - name: Build with Maven
         working-directory: backend
         run: mvn -q clean package -DskipTests
 
-      - name: Stage JAR for Ansible
-        run: |
-          mkdir -p ansible/files
-          cp backend/target/erp-system-1.0.0.jar ansible/files/
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: erp-backend-jar
+          path: backend/target/erp-system-1.0.0.jar
+          retention-days: 1
+
+  # 2) Install MySQL and create the database/user on the DB server.
+  configure-database:
+    name: Configure database server
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install Ansible
         run: |
@@ -75,17 +90,17 @@ jobs:
           mysql_app_user=erp_app
           EOF
 
-      - name: Wait for SSH to be reachable
+      - name: Wait for SSH on DB host
         run: |
           for i in $(seq 1 30); do
-            if nc -z -w 5 ${{ inputs.app_host }} 22 && nc -z -w 5 ${{ inputs.db_host }} 22; then
-              echo "SSH reachable on both hosts"; exit 0
+            if nc -z -w 5 ${{ inputs.db_host }} 22; then
+              echo "SSH reachable on DB host"; exit 0
             fi
             echo "waiting for SSH... ($i)"; sleep 10
           done
           echo "Timed out waiting for SSH"; exit 1
 
-      - name: Configure database server
+      - name: Run db.yml playbook
         working-directory: ansible
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
@@ -96,7 +111,59 @@ jobs:
                           mysql_root_password=${{ secrets.MYSQL_ROOT_PASSWORD }} \
                           mysql_app_password=${{ secrets.MYSQL_APP_PASSWORD }}"
 
-      - name: Configure application server
+  # 3) Install Java/nginx, drop in the JAR, and start the backend service.
+  deploy-application:
+    name: Deploy application server
+    needs: configure-database
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: erp-backend-jar
+          path: ansible/files
+
+      - name: Install Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible sshpass
+          ansible-galaxy collection install community.mysql
+
+      - name: Generate inventory
+        working-directory: ansible
+        run: |
+          ssh_user=azureuser
+          if [ "${{ inputs.cloud }}" = "aws" ]; then ssh_user=ubuntu; fi
+          mkdir -p inventory
+          cat > inventory/hosts.ini <<EOF
+          [app]
+          app-server ansible_host=${{ inputs.app_host }}
+
+          [db]
+          db-server ansible_host=${{ inputs.db_host }}
+
+          [all:vars]
+          ansible_user=${ssh_user}
+          ansible_ssh_common_args=-o StrictHostKeyChecking=no
+          db_private_ip=${{ inputs.db_private_ip }}
+          mysql_database=erp
+          mysql_app_user=erp_app
+          EOF
+
+      - name: Wait for SSH on app host
+        run: |
+          for i in $(seq 1 30); do
+            if nc -z -w 5 ${{ inputs.app_host }} 22; then
+              echo "SSH reachable on app host"; exit 0
+            fi
+            echo "waiting for SSH... ($i)"; sleep 10
+          done
+          echo "Timed out waiting for SSH"; exit 1
+
+      - name: Run app.yml playbook
         working-directory: ansible
         env:
           ANSIBLE_HOST_KEY_CHECKING: "False"
@@ -105,3 +172,21 @@ jobs:
             --extra-vars "ansible_password=${{ secrets.VM_ADMIN_PASSWORD }} \
                           ansible_become_pass=${{ secrets.VM_ADMIN_PASSWORD }} \
                           db_password=${{ secrets.MYSQL_APP_PASSWORD }}"
+
+  # 4) Verify the deployed app responds and is talking to MySQL.
+  smoke-test:
+    name: Smoke test
+    needs: deploy-application
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check actuator health
+        run: |
+          for i in $(seq 1 12); do
+            body=$(curl -fsS "http://${{ inputs.app_host }}/actuator/health" || true)
+            echo "attempt $i: $body"
+            if echo "$body" | grep -q '"status":"UP"'; then
+              echo "App is healthy"; exit 0
+            fi
+            sleep 10
+          done
+          echo "App did not become healthy in time"; exit 1
