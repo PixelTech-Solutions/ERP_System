@@ -3,6 +3,9 @@
 - name: Configure MySQL database server
   hosts: db
   become: true
+  # Run handlers even if a later task fails, so a notified MySQL restart
+  # is never skipped (otherwise a bind-address change can be left unapplied).
+  force_handlers: true
   # mysql_database and mysql_app_user come from the inventory [all:vars].
   # mysql_root_password and mysql_app_password must be passed as extra-vars.
 
@@ -31,6 +34,17 @@
         regexp: '^bind-address'
         line: 'bind-address = 0.0.0.0'
       notify: Restart MySQL
+
+    - name: Check what MySQL is currently listening on
+      ansible.builtin.command: ss -tlnH 'sport = :3306'
+      register: mysql_listen
+      changed_when: false
+
+    - name: Restart MySQL if it is not yet bound to all interfaces
+      ansible.builtin.service:
+        name: mysql
+        state: restarted
+      when: "'0.0.0.0:3306' not in mysql_listen.stdout"
 
     - name: Set MySQL root password (idempotent; fresh install or already set)
       community.mysql.mysql_user:
