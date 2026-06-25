@@ -3,10 +3,8 @@
 - name: Configure MySQL database server
   hosts: db
   become: true
-  vars:
-    mysql_database: "{{ mysql_database | default('erp') }}"
-    mysql_app_user: "{{ mysql_app_user | default('erp_app') }}"
-    # mysql_root_password and mysql_app_password must be passed as extra-vars.
+  # mysql_database and mysql_app_user come from the inventory [all:vars].
+  # mysql_root_password and mysql_app_password must be passed as extra-vars.
 
   tasks:
     - name: Update apt cache
