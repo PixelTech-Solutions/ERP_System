@@ -10,25 +10,84 @@ on:
   workflow_dispatch:
     inputs:
       cloud:
-        description: "Target cloud (resolves host IPs from repo variables)"
+        description: "Target cloud"
         type: choice
         options: [azure, aws]
         default: azure
+      environment:
+        description: "Target environment"
+        type: choice
+        options: [dev, prod]
+        default: dev
 
 permissions:
   contents: read
 
-# Host IPs are stored once as repository variables and resolved by the
-# selected cloud, so you never have to type them in.
-#   azure -> AZURE_APP_HOST / AZURE_DB_HOST / AZURE_DB_PRIVATE_IP
-#   aws   -> AWS_APP_HOST   / AWS_DB_HOST   / AWS_DB_PRIVATE_IP
-env:
-  SSH_USER: ${{ inputs.cloud == 'aws' && 'ubuntu' || 'azureuser' }}
-  APP_HOST: ${{ inputs.cloud == 'aws' && vars.AWS_APP_HOST || vars.AZURE_APP_HOST }}
-  DB_HOST: ${{ inputs.cloud == 'aws' && vars.AWS_DB_HOST || vars.AZURE_DB_HOST }}
-  DB_PRIVATE_IP: ${{ inputs.cloud == 'aws' && vars.AWS_DB_PRIVATE_IP || vars.AZURE_DB_PRIVATE_IP }}
+# Host IPs are stored once as repository variables and resolved by
+# cloud + environment, so you never have to type them in.
+#   AZURE_DEV_APP_HOST / AZURE_DEV_DB_HOST / AZURE_DEV_DB_PRIVATE_IP
+#   AZURE_PROD_APP_HOST / AZURE_PROD_DB_HOST / AZURE_PROD_DB_PRIVATE_IP
+#   AWS_DEV_APP_HOST   / AWS_DEV_DB_HOST   / AWS_DEV_DB_PRIVATE_IP
+#   AWS_PROD_APP_HOST  / AWS_PROD_DB_HOST  / AWS_PROD_DB_PRIVATE_IP
 
 jobs:
+  # 0) Resolve the target host IPs and SSH user once, expose to downstream jobs.
+  resolve:
+    name: Resolve target hosts
+    runs-on: ubuntu-latest
+    outputs:
+      ssh_user: ${{ steps.pick.outputs.ssh_user }}
+      app_host: ${{ steps.pick.outputs.app_host }}
+      db_host: ${{ steps.pick.outputs.db_host }}
+      db_private_ip: ${{ steps.pick.outputs.db_private_ip }}
+    steps:
+      - name: Pick variables for ${{ inputs.cloud }}/${{ inputs.environment }}
+        id: pick
+        env:
+          AZURE_DEV_APP_HOST: ${{ vars.AZURE_DEV_APP_HOST }}
+          AZURE_DEV_DB_HOST: ${{ vars.AZURE_DEV_DB_HOST }}
+          AZURE_DEV_DB_PRIVATE_IP: ${{ vars.AZURE_DEV_DB_PRIVATE_IP }}
+          AZURE_PROD_APP_HOST: ${{ vars.AZURE_PROD_APP_HOST }}
+          AZURE_PROD_DB_HOST: ${{ vars.AZURE_PROD_DB_HOST }}
+          AZURE_PROD_DB_PRIVATE_IP: ${{ vars.AZURE_PROD_DB_PRIVATE_IP }}
+          AWS_DEV_APP_HOST: ${{ vars.AWS_DEV_APP_HOST }}
+          AWS_DEV_DB_HOST: ${{ vars.AWS_DEV_DB_HOST }}
+          AWS_DEV_DB_PRIVATE_IP: ${{ vars.AWS_DEV_DB_PRIVATE_IP }}
+          AWS_PROD_APP_HOST: ${{ vars.AWS_PROD_APP_HOST }}
+          AWS_PROD_DB_HOST: ${{ vars.AWS_PROD_DB_HOST }}
+          AWS_PROD_DB_PRIVATE_IP: ${{ vars.AWS_PROD_DB_PRIVATE_IP }}
+        run: |
+          cloud="${{ inputs.cloud }}"
+          env="${{ inputs.environment }}"
+          prefix="$(echo "${cloud}_${env}" | tr '[:lower:]' '[:upper:]')"
+
+          ssh_user=azureuser
+          if [ "$cloud" = "aws" ]; then ssh_user=ubuntu; fi
+
+          app_host_var="${prefix}_APP_HOST"
+          db_host_var="${prefix}_DB_HOST"
+          db_private_ip_var="${prefix}_DB_PRIVATE_IP"
+
+          app_host="${!app_host_var}"
+          db_host="${!db_host_var}"
+          db_private_ip="${!db_private_ip_var}"
+
+          if [ -z "$app_host" ] || [ -z "$db_host" ] || [ -z "$db_private_ip" ]; then
+            echo "Missing repo variables for ${prefix}_*. Define them under Settings -> Variables." >&2
+            echo "  ${app_host_var}=$app_host"
+            echo "  ${db_host_var}=$db_host"
+            echo "  ${db_private_ip_var}=$db_private_ip"
+            exit 1
+          fi
+
+          echo "Resolved $cloud/$env -> ssh_user=$ssh_user app=$app_host db=$db_host db_priv=$db_private_ip"
+          {
+            echo "ssh_user=$ssh_user"
+            echo "app_host=$app_host"
+            echo "db_host=$db_host"
+            echo "db_private_ip=$db_private_ip"
+          } >> "$GITHUB_OUTPUT"
+
   # 1) Build backend + frontend artifacts.
   build:
     name: Build backend and frontend artifacts
@@ -79,8 +138,13 @@ jobs:
   # 2) Install MySQL and create the database/user on the DB server.
   configure-database:
     name: Configure database server
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
+    env:
+      SSH_USER: ${{ needs.resolve.outputs.ssh_user }}
+      APP_HOST: ${{ needs.resolve.outputs.app_host }}
+      DB_HOST: ${{ needs.resolve.outputs.db_host }}
+      DB_PRIVATE_IP: ${{ needs.resolve.outputs.db_private_ip }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -134,8 +198,13 @@ jobs:
   # 3) Install Java/nginx, drop in the JAR, and start the backend service.
   deploy-application:
     name: Deploy application server
-    needs: configure-database
+    needs: [resolve, configure-database]
     runs-on: ubuntu-latest
+    env:
+      SSH_USER: ${{ needs.resolve.outputs.ssh_user }}
+      APP_HOST: ${{ needs.resolve.outputs.app_host }}
+      DB_HOST: ${{ needs.resolve.outputs.db_host }}
+      DB_PRIVATE_IP: ${{ needs.resolve.outputs.db_private_ip }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -200,8 +269,10 @@ jobs:
   # 4) Verify both API health and frontend home page.
   smoke-test:
     name: Smoke test
-    needs: deploy-application
+    needs: [resolve, deploy-application]
     runs-on: ubuntu-latest
+    env:
+      APP_HOST: ${{ needs.resolve.outputs.app_host }}
     steps:
       - name: Check actuator health
         run: |
