@@ -50,6 +50,27 @@
         mode: "0644"
       notify: Restart ERP backend
 
+    - name: Recreate frontend web root
+      ansible.builtin.file:
+        path: /var/www/erp
+        state: absent
+
+    - name: Create frontend web root
+      ansible.builtin.file:
+        path: /var/www/erp
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Deploy frontend dist
+      ansible.builtin.unarchive:
+        src: ../files/frontend-dist.tar.gz
+        dest: /var/www/erp
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
     - name: Install systemd unit for the backend
       ansible.builtin.template:
         src: ../templates/erp-backend.service.j2

@@ -29,9 +29,9 @@ env:
   DB_PRIVATE_IP: ${{ inputs.cloud == 'aws' && vars.AWS_DB_PRIVATE_IP || vars.AZURE_DB_PRIVATE_IP }}
 
 jobs:
-  # 1) Compile and package the Spring Boot backend, publish the JAR as an artifact.
+  # 1) Build backend + frontend artifacts.
   build:
-    name: Build backend JAR
+    name: Build backend and frontend artifacts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -48,11 +48,32 @@ jobs:
         working-directory: backend
         run: mvn -q clean package -DskipTests
 
-      - name: Upload JAR artifact
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend dist
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+          tar -C dist -czf ../frontend-dist.tar.gz .
+
+      - name: Upload backend JAR artifact
         uses: actions/upload-artifact@v4
         with:
           name: erp-backend-jar
           path: backend/target/erp-system-1.0.0.jar
+          retention-days: 1
+
+      - name: Upload frontend dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: erp-frontend-dist
+          path: frontend-dist.tar.gz
           retention-days: 1
 
   # 2) Install MySQL and create the database/user on the DB server.
@@ -125,6 +146,12 @@ jobs:
           name: erp-backend-jar
           path: ansible/files
 
+      - name: Download frontend dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: erp-frontend-dist
+          path: ansible/files
+
       - name: Install Ansible
         run: |
           sudo apt-get update
@@ -170,7 +197,7 @@ jobs:
                           ansible_become_pass=${{ secrets.VM_ADMIN_PASSWORD }} \
                           db_password=${{ secrets.MYSQL_APP_PASSWORD }}"
 
-  # 4) Verify the deployed app responds and is talking to MySQL.
+  # 4) Verify both API health and frontend home page.
   smoke-test:
     name: Smoke test
     needs: deploy-application
@@ -182,8 +209,22 @@ jobs:
             body=$(curl -fsS "http://${APP_HOST}/actuator/health" || true)
             echo "attempt $i: $body"
             if echo "$body" | grep -q '"status":"UP"'; then
-              echo "App is healthy"; exit 0
+              echo "App is healthy"; break
+            fi
+            sleep 10
+            if [ "$i" -eq 12 ]; then
+              echo "App did not become healthy in time"; exit 1
+            fi
+          done
+
+      - name: Check frontend home page
+        run: |
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /tmp/home.html -w "%{http_code}" "http://${APP_HOST}/" || true)
+            echo "attempt $i: status=$code"
+            if [ "$code" = "200" ] && grep -qi "<html" /tmp/home.html; then
+              echo "Frontend is reachable"; exit 0
             fi
             sleep 10
           done
-          echo "App did not become healthy in time"; exit 1
+          echo "Frontend did not become reachable in time"; exit 1
