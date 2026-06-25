@@ -32,19 +32,16 @@
         line: 'bind-address = 0.0.0.0'
       notify: Restart MySQL
 
-    - name: Check whether root credentials file already exists
-      ansible.builtin.stat:
-        path: /root/.my.cnf
-      register: root_my_cnf
-
-    - name: Set MySQL root password (first run, via auth socket)
+    - name: Set MySQL root password (idempotent; fresh install or already set)
       community.mysql.mysql_user:
         name: root
         password: "{{ mysql_root_password }}"
         host: localhost
+        check_implicit_admin: true
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
         login_unix_socket: /var/run/mysqld/mysqld.sock
         state: present
-      when: not root_my_cnf.stat.exists
 
     - name: Write root credentials file for idempotent re-runs
       ansible.builtin.copy:
