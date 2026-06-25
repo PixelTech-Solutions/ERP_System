@@ -5,8 +5,10 @@
 #  - PROD hosts  -> Datadog Agent  (pushes metrics + logs to datadoghq.com)
 #  - DEV  hosts  -> Grafana Agent  (pushes metrics + logs to Grafana Cloud)
 #
-# Which one runs is decided by the `environment` extra-var (dev | prod)
-# passed in from the GitHub Actions workflow.
+# Which one runs is decided by the `target_env` extra-var (dev | prod)
+# passed in from the GitHub Actions workflow. We deliberately do NOT call
+# it `environment` because that name is reserved by Ansible itself for
+# setting per-task env vars.
 #
 # On every APP host we also scrape Spring Boot's /actuator/prometheus and
 # run a synthetic HTTP check against /actuator/health.
@@ -17,7 +19,7 @@
   become: true
   gather_facts: true
   vars:
-    monitor_target: "{{ 'datadog' if environment == 'prod' else 'grafana' }}"
+    monitor_target: "{{ 'datadog' if target_env == 'prod' else 'grafana' }}"
 
   tasks:
     # ---------------------------------------------------------------
@@ -27,7 +29,7 @@
       ansible.builtin.shell: |
         DD_API_KEY="{{ datadog_api_key }}" \
         DD_SITE="{{ datadog_site }}" \
-        DD_HOSTNAME="erp-{{ inventory_hostname }}-{{ environment }}" \
+        DD_HOSTNAME="erp-{{ inventory_hostname }}-{{ target_env }}" \
         DD_INSTALL_ONLY=true \
         bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
       args:
@@ -43,9 +45,9 @@
         content: |
           api_key: {{ datadog_api_key }}
           site: {{ datadog_site }}
-          hostname: erp-{{ inventory_hostname }}-{{ environment }}
+          hostname: erp-{{ inventory_hostname }}-{{ target_env }}
           tags:
-            - env:{{ environment }}
+            - env:{{ target_env }}
             - cloud:{{ cloud }}
             - service:erp-system
             - role:{{ 'app' if inventory_hostname in groups['app'] else 'db' }}
@@ -204,11 +206,11 @@
             global:
               scrape_interval: 30s
               external_labels:
-                env: {{ environment }}
+                env: {{ target_env }}
                 cloud: {{ cloud }}
                 service: erp-system
                 role: {{ 'app' if inventory_hostname in groups['app'] else 'db' }}
-                host: erp-{{ inventory_hostname }}-{{ environment }}
+                host: erp-{{ inventory_hostname }}-{{ target_env }}
             wal_directory: /var/lib/grafana-agent
             configs:
               - name: integrations
@@ -244,7 +246,7 @@
                       max_age: 12h
                       labels:
                         job: erp-backend
-                        env: {{ environment }}
+                        env: {{ target_env }}
                         cloud: {{ cloud }}
                     relabel_configs:
                       - source_labels: ['__journal__systemd_unit']
@@ -253,7 +255,7 @@
                     static_configs:
                       - labels:
                           job: nginx
-                          env: {{ environment }}
+                          env: {{ target_env }}
                           cloud: {{ cloud }}
                           __path__: /var/log/nginx/*.log
           {% else %}
@@ -261,7 +263,7 @@
                     static_configs:
                       - labels:
                           job: mysql
-                          env: {{ environment }}
+                          env: {{ target_env }}
                           cloud: {{ cloud }}
                           __path__: /var/log/mysql/error.log
           {% endif %}

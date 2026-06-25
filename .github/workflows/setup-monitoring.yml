@@ -161,7 +161,7 @@ jobs:
             --extra-vars "ansible_password=${ANSIBLE_PASSWORD}" \
             --extra-vars "ansible_become_pass=${ANSIBLE_PASSWORD}" \
             --extra-vars "cloud=${{ inputs.cloud }}" \
-            --extra-vars "environment=${{ inputs.environment }}" \
+            --extra-vars "target_env=${{ inputs.environment }}" \
             --extra-vars "datadog_api_key=${DATADOG_API_KEY:-unused}" \
             --extra-vars "datadog_site=${DATADOG_SITE:-us5.datadoghq.com}" \
             --extra-vars "grafana_cloud_api_key=${GRAFANA_CLOUD_API_KEY:-unused}" \
