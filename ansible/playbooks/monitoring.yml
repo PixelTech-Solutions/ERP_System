@@ -29,7 +29,7 @@
       ansible.builtin.shell: |
         DD_API_KEY="{{ datadog_api_key }}" \
         DD_SITE="{{ datadog_site }}" \
-        DD_HOSTNAME="erp-{{ inventory_hostname }}-{{ target_env }}" \
+        DD_HOSTNAME="erp-{{ cloud }}-{{ inventory_hostname }}-{{ target_env }}" \
         DD_INSTALL_ONLY=true \
         bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
       args:
@@ -45,7 +45,7 @@
         content: |
           api_key: {{ datadog_api_key }}
           site: {{ datadog_site }}
-          hostname: erp-{{ inventory_hostname }}-{{ target_env }}
+          hostname: erp-{{ cloud }}-{{ inventory_hostname }}-{{ target_env }}
           tags:
             - env:{{ target_env }}
             - cloud:{{ cloud }}
@@ -210,7 +210,7 @@
                 cloud: {{ cloud }}
                 service: erp-system
                 role: {{ 'app' if inventory_hostname in groups['app'] else 'db' }}
-                host: erp-{{ inventory_hostname }}-{{ target_env }}
+                host: erp-{{ cloud }}-{{ inventory_hostname }}-{{ target_env }}
             wal_directory: /var/lib/grafana-agent
             configs:
               - name: integrations
