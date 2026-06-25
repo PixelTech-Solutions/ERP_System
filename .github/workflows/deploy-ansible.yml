@@ -85,7 +85,7 @@ jobs:
           ansible_user=${SSH_USER}
           ansible_ssh_common_args=-o StrictHostKeyChecking=no
           db_private_ip=${DB_PRIVATE_IP}
-          mysql_database=erp
+          mysql_database=erpdb
           mysql_app_user=erp_app
           EOF
 
@@ -146,7 +146,7 @@ jobs:
           ansible_user=${SSH_USER}
           ansible_ssh_common_args=-o StrictHostKeyChecking=no
           db_private_ip=${DB_PRIVATE_IP}
-          mysql_database=erp
+          mysql_database=erpdb
           mysql_app_user=erp_app
           EOF
 

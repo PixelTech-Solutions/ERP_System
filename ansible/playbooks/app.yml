@@ -9,7 +9,7 @@
     jar_name: erp-system-1.0.0.jar
     backend_port: 8080
     db_host: "{{ db_private_ip }}"
-    db_name: "{{ mysql_database | default('erp') }}"
+    db_name: "{{ mysql_database | default('erpdb') }}"
     db_user: "{{ mysql_app_user | default('erp_app') }}"
     # db_password must be passed as an extra-var.
 

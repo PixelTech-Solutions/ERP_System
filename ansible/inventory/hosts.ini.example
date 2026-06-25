@@ -20,6 +20,6 @@ ansible_ssh_common_args=-o StrictHostKeyChecking=no
 db_private_ip=<DB_PRIVATE_IP>
 
 # MySQL application database/credentials created on the db host.
-mysql_database=erp
+mysql_database=erpdb
 mysql_app_user=erp_app
 # Pass mysql_app_password and mysql_root_password as extra-vars at run time.

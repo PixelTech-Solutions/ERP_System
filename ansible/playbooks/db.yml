@@ -59,6 +59,18 @@
         name: "{{ mysql_database }}"
         state: present
 
+    - name: Copy schema to the database server
+      ansible.builtin.copy:
+        src: ../../db/schema.sql
+        dest: /tmp/schema.sql
+        mode: "0644"
+
+    - name: Load schema into the database
+      community.mysql.mysql_db:
+        name: "{{ mysql_database }}"
+        state: import
+        target: /tmp/schema.sql
+
     - name: Create application user (accessible from the VNet/VPC)
       community.mysql.mysql_user:
         name: "{{ mysql_app_user }}"
