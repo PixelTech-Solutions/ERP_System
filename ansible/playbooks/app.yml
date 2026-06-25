@@ -82,7 +82,7 @@
     - name: Ensure backend is running and enabled
       ansible.builtin.systemd:
         name: erp-backend
-        state: started
+        state: restarted
         enabled: true
         daemon_reload: true
 
