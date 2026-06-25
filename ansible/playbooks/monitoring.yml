@@ -1,0 +1,308 @@
+---
+# ===========================================================================
+# Install the right monitoring agent on each host.
+#
+#  - PROD hosts  -> Datadog Agent  (pushes metrics + logs to datadoghq.com)
+#  - DEV  hosts  -> Grafana Agent  (pushes metrics + logs to Grafana Cloud)
+#
+# Which one runs is decided by the `environment` extra-var (dev | prod)
+# passed in from the GitHub Actions workflow.
+#
+# On every APP host we also scrape Spring Boot's /actuator/prometheus and
+# run a synthetic HTTP check against /actuator/health.
+# ===========================================================================
+
+- name: Install monitoring agent
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    monitor_target: "{{ 'datadog' if environment == 'prod' else 'grafana' }}"
+
+  tasks:
+    # ---------------------------------------------------------------
+    # 1) PRODUCTION  ->  Datadog Agent
+    # ---------------------------------------------------------------
+    - name: Datadog | Install via official script (idempotent)
+      ansible.builtin.shell: |
+        DD_API_KEY="{{ datadog_api_key }}" \
+        DD_SITE="{{ datadog_site }}" \
+        DD_HOSTNAME="erp-{{ inventory_hostname }}-{{ environment }}" \
+        DD_INSTALL_ONLY=true \
+        bash -c "$(curl -L https://install.datadoghq.com/scripts/install_script_agent7.sh)"
+      args:
+        creates: /usr/bin/datadog-agent
+      when: monitor_target == 'datadog'
+
+    - name: Datadog | Write base datadog.yaml
+      ansible.builtin.copy:
+        dest: /etc/datadog-agent/datadog.yaml
+        owner: dd-agent
+        group: dd-agent
+        mode: '0640'
+        content: |
+          api_key: {{ datadog_api_key }}
+          site: {{ datadog_site }}
+          hostname: erp-{{ inventory_hostname }}-{{ environment }}
+          tags:
+            - env:{{ environment }}
+            - cloud:{{ cloud }}
+            - service:erp-system
+            - role:{{ 'app' if inventory_hostname in groups['app'] else 'db' }}
+          logs_enabled: true
+          process_config:
+            enabled: 'true'
+      when: monitor_target == 'datadog'
+      notify: Restart Datadog Agent
+
+    - name: Datadog | Spring Boot Prometheus + HTTP check (app hosts only)
+      ansible.builtin.copy:
+        dest: /etc/datadog-agent/conf.d/openmetrics.d/conf.yaml
+        owner: dd-agent
+        group: dd-agent
+        mode: '0640'
+        content: |
+          init_config:
+          instances:
+            - openmetrics_endpoint: http://127.0.0.1:8080/actuator/prometheus
+              namespace: erp
+              metrics:
+                - jvm_memory_used_bytes
+                - jvm_memory_max_bytes
+                - jvm_gc_pause_seconds
+                - http_server_requests_seconds
+                - hikaricp_connections
+                - hikaricp_connections_active
+                - process_cpu_usage
+                - system_cpu_usage
+      when:
+        - monitor_target == 'datadog'
+        - inventory_hostname in groups['app']
+      notify: Restart Datadog Agent
+
+    - name: Datadog | HTTP synthetic check on /actuator/health (app hosts only)
+      ansible.builtin.copy:
+        dest: /etc/datadog-agent/conf.d/http_check.d/conf.yaml
+        owner: dd-agent
+        group: dd-agent
+        mode: '0640'
+        content: |
+          init_config:
+          instances:
+            - name: erp_backend_health
+              url: http://127.0.0.1:8080/actuator/health
+              timeout: 5
+              http_response_status_code: 200
+              content_match: '"status":"UP"'
+              tags:
+                - check:erp_backend_health
+      when:
+        - monitor_target == 'datadog'
+        - inventory_hostname in groups['app']
+      notify: Restart Datadog Agent
+
+    - name: Datadog | Tail erp-backend journal + nginx logs (app hosts only)
+      ansible.builtin.copy:
+        dest: /etc/datadog-agent/conf.d/journald.d/conf.yaml
+        owner: dd-agent
+        group: dd-agent
+        mode: '0640'
+        content: |
+          logs:
+            - type: journald
+              source: erp-backend
+              service: erp-backend
+              include_units:
+                - erp-backend.service
+            - type: file
+              path: /var/log/nginx/access.log
+              source: nginx
+              service: nginx-access
+            - type: file
+              path: /var/log/nginx/error.log
+              source: nginx
+              service: nginx-error
+      when:
+        - monitor_target == 'datadog'
+        - inventory_hostname in groups['app']
+      notify: Restart Datadog Agent
+
+    - name: Datadog | MySQL error log (db hosts only)
+      ansible.builtin.copy:
+        dest: /etc/datadog-agent/conf.d/mysql.d/conf.yaml
+        owner: dd-agent
+        group: dd-agent
+        mode: '0640'
+        content: |
+          logs:
+            - type: file
+              path: /var/log/mysql/error.log
+              source: mysql
+              service: mysql
+      when:
+        - monitor_target == 'datadog'
+        - inventory_hostname in groups['db']
+      notify: Restart Datadog Agent
+
+    - name: Datadog | Allow dd-agent to read journal + nginx + mysql logs
+      ansible.builtin.user:
+        name: dd-agent
+        groups: adm,systemd-journal
+        append: true
+      when: monitor_target == 'datadog'
+      notify: Restart Datadog Agent
+
+    - name: Datadog | Ensure agent is started and enabled
+      ansible.builtin.service:
+        name: datadog-agent
+        state: started
+        enabled: true
+      when: monitor_target == 'datadog'
+
+    # ---------------------------------------------------------------
+    # 2) DEVELOPMENT  ->  Grafana Agent (push to Grafana Cloud)
+    # ---------------------------------------------------------------
+    - name: Grafana | Install transport deps
+      ansible.builtin.apt:
+        name: [gnupg, software-properties-common, wget, apt-transport-https]
+        update_cache: true
+        cache_valid_time: 3600
+      when: monitor_target == 'grafana'
+
+    - name: Grafana | Add Grafana apt key
+      ansible.builtin.shell: |
+        set -e
+        wget -qO - https://apt.grafana.com/gpg.key | gpg --dearmor > /usr/share/keyrings/grafana.gpg
+      args:
+        creates: /usr/share/keyrings/grafana.gpg
+      when: monitor_target == 'grafana'
+
+    - name: Grafana | Add apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/grafana.list
+        content: |
+          deb [signed-by=/usr/share/keyrings/grafana.gpg] https://apt.grafana.com stable main
+      when: monitor_target == 'grafana'
+
+    - name: Grafana | Install grafana-agent
+      ansible.builtin.apt:
+        name: grafana-agent
+        state: present
+        update_cache: true
+      when: monitor_target == 'grafana'
+
+    - name: Grafana | Write agent config
+      ansible.builtin.copy:
+        dest: /etc/grafana-agent.yaml
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          server:
+            log_level: info
+          metrics:
+            global:
+              scrape_interval: 30s
+              external_labels:
+                env: {{ environment }}
+                cloud: {{ cloud }}
+                service: erp-system
+                role: {{ 'app' if inventory_hostname in groups['app'] else 'db' }}
+                host: erp-{{ inventory_hostname }}-{{ environment }}
+            wal_directory: /var/lib/grafana-agent
+            configs:
+              - name: integrations
+                remote_write:
+                  - url: {{ grafana_prom_url }}
+                    basic_auth:
+                      username: "{{ grafana_prom_user }}"
+                      password: "{{ grafana_cloud_api_key }}"
+                scrape_configs:
+                  - job_name: node
+                    static_configs:
+                      - targets: ['127.0.0.1:9100']
+          {% if inventory_hostname in groups['app'] %}
+                  - job_name: erp-backend
+                    metrics_path: /actuator/prometheus
+                    static_configs:
+                      - targets: ['127.0.0.1:8080']
+          {% endif %}
+          logs:
+            configs:
+              - name: default
+                clients:
+                  - url: {{ grafana_loki_url }}
+                    basic_auth:
+                      username: "{{ grafana_loki_user }}"
+                      password: "{{ grafana_cloud_api_key }}"
+                positions:
+                  filename: /var/lib/grafana-agent/positions.yaml
+                scrape_configs:
+          {% if inventory_hostname in groups['app'] %}
+                  - job_name: erp-backend-journal
+                    journal:
+                      max_age: 12h
+                      labels:
+                        job: erp-backend
+                        env: {{ environment }}
+                        cloud: {{ cloud }}
+                    relabel_configs:
+                      - source_labels: ['__journal__systemd_unit']
+                        target_label: unit
+                  - job_name: nginx
+                    static_configs:
+                      - labels:
+                          job: nginx
+                          env: {{ environment }}
+                          cloud: {{ cloud }}
+                          __path__: /var/log/nginx/*.log
+          {% else %}
+                  - job_name: mysql
+                    static_configs:
+                      - labels:
+                          job: mysql
+                          env: {{ environment }}
+                          cloud: {{ cloud }}
+                          __path__: /var/log/mysql/error.log
+          {% endif %}
+      when: monitor_target == 'grafana'
+      notify: Restart Grafana Agent
+
+    - name: Grafana | Install node_exporter for system metrics
+      ansible.builtin.apt:
+        name: prometheus-node-exporter
+        state: present
+      when: monitor_target == 'grafana'
+
+    - name: Grafana | Allow grafana-agent to read journal + nginx + mysql logs
+      ansible.builtin.user:
+        name: grafana-agent
+        groups: adm,systemd-journal
+        append: true
+      when: monitor_target == 'grafana'
+      notify: Restart Grafana Agent
+
+    - name: Grafana | Ensure node_exporter is up
+      ansible.builtin.service:
+        name: prometheus-node-exporter
+        state: started
+        enabled: true
+      when: monitor_target == 'grafana'
+
+    - name: Grafana | Ensure grafana-agent is up
+      ansible.builtin.service:
+        name: grafana-agent
+        state: started
+        enabled: true
+      when: monitor_target == 'grafana'
+
+  handlers:
+    - name: Restart Datadog Agent
+      ansible.builtin.service:
+        name: datadog-agent
+        state: restarted
+
+    - name: Restart Grafana Agent
+      ansible.builtin.service:
+        name: grafana-agent
+        state: restarted

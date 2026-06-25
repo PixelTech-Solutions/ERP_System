@@ -1,0 +1,196 @@
+name: "Setup Monitoring (Ansible)"
+
+# Installs the right monitoring agent on the already-provisioned ERP VMs.
+#   prod environments -> Datadog Agent  (push to datadoghq)
+#   dev  environments -> Grafana Agent  (push to Grafana Cloud)
+#
+# Re-uses the same cloud x environment resolver as deploy-ansible.yml so
+# host IPs are looked up from repository Variables, not typed in.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cloud:
+        description: "Target cloud"
+        type: choice
+        options: [azure, aws]
+        default: azure
+      environment:
+        description: "Target environment"
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+permissions:
+  contents: read
+
+jobs:
+  # 0) Resolve the target host IPs (same pattern as deploy-ansible.yml).
+  resolve:
+    name: Resolve target hosts
+    runs-on: ubuntu-latest
+    outputs:
+      ssh_user: ${{ steps.pick.outputs.ssh_user }}
+      app_host: ${{ steps.pick.outputs.app_host }}
+      db_host: ${{ steps.pick.outputs.db_host }}
+      db_private_ip: ${{ steps.pick.outputs.db_private_ip }}
+    steps:
+      - name: Pick variables for ${{ inputs.cloud }}/${{ inputs.environment }}
+        id: pick
+        env:
+          AZURE_DEV_APP_HOST: ${{ vars.AZURE_DEV_APP_HOST }}
+          AZURE_DEV_DB_HOST: ${{ vars.AZURE_DEV_DB_HOST }}
+          AZURE_DEV_DB_PRIVATE_IP: ${{ vars.AZURE_DEV_DB_PRIVATE_IP }}
+          AZURE_PROD_APP_HOST: ${{ vars.AZURE_PROD_APP_HOST }}
+          AZURE_PROD_DB_HOST: ${{ vars.AZURE_PROD_DB_HOST }}
+          AZURE_PROD_DB_PRIVATE_IP: ${{ vars.AZURE_PROD_DB_PRIVATE_IP }}
+          AWS_DEV_APP_HOST: ${{ vars.AWS_DEV_APP_HOST }}
+          AWS_DEV_DB_HOST: ${{ vars.AWS_DEV_DB_HOST }}
+          AWS_DEV_DB_PRIVATE_IP: ${{ vars.AWS_DEV_DB_PRIVATE_IP }}
+          AWS_PROD_APP_HOST: ${{ vars.AWS_PROD_APP_HOST }}
+          AWS_PROD_DB_HOST: ${{ vars.AWS_PROD_DB_HOST }}
+          AWS_PROD_DB_PRIVATE_IP: ${{ vars.AWS_PROD_DB_PRIVATE_IP }}
+        run: |
+          cloud="${{ inputs.cloud }}"
+          env="${{ inputs.environment }}"
+          prefix="$(echo "${cloud}_${env}" | tr '[:lower:]' '[:upper:]')"
+
+          ssh_user=azureuser
+          if [ "$cloud" = "aws" ]; then ssh_user=ubuntu; fi
+
+          app_host_var="${prefix}_APP_HOST"
+          db_host_var="${prefix}_DB_HOST"
+          db_private_ip_var="${prefix}_DB_PRIVATE_IP"
+
+          app_host="${!app_host_var}"
+          db_host="${!db_host_var}"
+          db_private_ip="${!db_private_ip_var}"
+
+          if [ -z "$app_host" ] || [ -z "$db_host" ] || [ -z "$db_private_ip" ]; then
+            echo "Missing repo variables for ${prefix}_*. Define them under Settings -> Variables." >&2
+            exit 1
+          fi
+
+          echo "Resolved $cloud/$env -> ssh_user=$ssh_user app=$app_host db=$db_host db_priv=$db_private_ip"
+          {
+            echo "ssh_user=$ssh_user"
+            echo "app_host=$app_host"
+            echo "db_host=$db_host"
+            echo "db_private_ip=$db_private_ip"
+          } >> "$GITHUB_OUTPUT"
+
+  install-monitoring:
+    name: Install monitoring agent (${{ inputs.cloud }}/${{ inputs.environment }})
+    needs: resolve
+    runs-on: ubuntu-latest
+    env:
+      SSH_USER: ${{ needs.resolve.outputs.ssh_user }}
+      APP_HOST: ${{ needs.resolve.outputs.app_host }}
+      DB_HOST: ${{ needs.resolve.outputs.db_host }}
+      DB_PRIVATE_IP: ${{ needs.resolve.outputs.db_private_ip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ansible + sshpass
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ansible sshpass
+          ansible --version
+
+      - name: Render inventory
+        working-directory: ansible
+        run: |
+          mkdir -p inventory
+          cat > inventory/hosts.ini <<EOF
+          [app]
+          app-server ansible_host=${APP_HOST}
+
+          [db]
+          db-server ansible_host=${DB_HOST}
+
+          [all:vars]
+          ansible_user=${SSH_USER}
+          ansible_ssh_common_args=-o StrictHostKeyChecking=no
+          db_private_ip=${DB_PRIVATE_IP}
+          EOF
+          echo "----- inventory -----"
+          cat inventory/hosts.ini
+
+      - name: Wait for SSH on both hosts
+        run: |
+          for host in "$APP_HOST" "$DB_HOST"; do
+            for i in $(seq 1 30); do
+              if nc -z -w 5 "$host" 22; then
+                echo "$host:22 reachable"
+                break
+              fi
+              echo "($i/30) waiting for $host:22 ..."
+              sleep 5
+            done
+          done
+
+      - name: Validate required secrets are set
+        env:
+          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+          GRAFANA_CLOUD_API_KEY: ${{ secrets.GRAFANA_CLOUD_API_KEY }}
+        run: |
+          env="${{ inputs.environment }}"
+          if [ "$env" = "prod" ] && [ -z "$DATADOG_API_KEY" ]; then
+            echo "DATADOG_API_KEY secret is required for prod monitoring." >&2
+            exit 1
+          fi
+          if [ "$env" = "dev" ] && [ -z "$GRAFANA_CLOUD_API_KEY" ]; then
+            echo "GRAFANA_CLOUD_API_KEY secret is required for dev monitoring." >&2
+            exit 1
+          fi
+
+      - name: Run monitoring playbook
+        working-directory: ansible
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+          ANSIBLE_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
+          DATADOG_API_KEY: ${{ secrets.DATADOG_API_KEY }}
+          DATADOG_SITE: ${{ vars.DATADOG_SITE }}
+          GRAFANA_CLOUD_API_KEY: ${{ secrets.GRAFANA_CLOUD_API_KEY }}
+          GRAFANA_PROM_URL: ${{ vars.GRAFANA_PROM_URL }}
+          GRAFANA_PROM_USER: ${{ vars.GRAFANA_PROM_USER }}
+          GRAFANA_LOKI_URL: ${{ vars.GRAFANA_LOKI_URL }}
+          GRAFANA_LOKI_USER: ${{ vars.GRAFANA_LOKI_USER }}
+        run: |
+          ansible-playbook -i inventory/hosts.ini playbooks/monitoring.yml \
+            --extra-vars "ansible_password=${ANSIBLE_PASSWORD}" \
+            --extra-vars "ansible_become_pass=${ANSIBLE_PASSWORD}" \
+            --extra-vars "cloud=${{ inputs.cloud }}" \
+            --extra-vars "environment=${{ inputs.environment }}" \
+            --extra-vars "datadog_api_key=${DATADOG_API_KEY:-unused}" \
+            --extra-vars "datadog_site=${DATADOG_SITE:-us5.datadoghq.com}" \
+            --extra-vars "grafana_cloud_api_key=${GRAFANA_CLOUD_API_KEY:-unused}" \
+            --extra-vars "grafana_prom_url=${GRAFANA_PROM_URL:-unused}" \
+            --extra-vars "grafana_prom_user=${GRAFANA_PROM_USER:-unused}" \
+            --extra-vars "grafana_loki_url=${GRAFANA_LOKI_URL:-unused}" \
+            --extra-vars "grafana_loki_user=${GRAFANA_LOKI_USER:-unused}"
+
+  verify:
+    name: Verify agent is reporting
+    needs: [resolve, install-monitoring]
+    runs-on: ubuntu-latest
+    env:
+      SSH_USER: ${{ needs.resolve.outputs.ssh_user }}
+      APP_HOST: ${{ needs.resolve.outputs.app_host }}
+      DB_HOST: ${{ needs.resolve.outputs.db_host }}
+    steps:
+      - name: Install sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y sshpass
+
+      - name: Check agent status on both hosts
+        env:
+          ANSIBLE_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
+        run: |
+          agent="grafana-agent"
+          if [ "${{ inputs.environment }}" = "prod" ]; then agent="datadog-agent"; fi
+          for host in "$APP_HOST" "$DB_HOST"; do
+            echo "----- $host: $agent -----"
+            sshpass -p "$ANSIBLE_PASSWORD" \
+              ssh -o StrictHostKeyChecking=no "$SSH_USER@$host" \
+              "systemctl is-active $agent && systemctl status $agent --no-pager | head -n 12"
+          done
