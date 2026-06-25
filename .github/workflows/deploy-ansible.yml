@@ -10,22 +10,23 @@ on:
   workflow_dispatch:
     inputs:
       cloud:
-        description: "Target cloud (sets the SSH user)"
+        description: "Target cloud (resolves host IPs from repo variables)"
         type: choice
         options: [azure, aws]
         default: azure
-      app_host:
-        description: "App server PUBLIC IP (Terraform output app_public_ip)"
-        required: true
-      db_host:
-        description: "DB server PUBLIC IP (Terraform output db_public_ip)"
-        required: true
-      db_private_ip:
-        description: "DB server PRIVATE IP (Terraform output db_private_ip)"
-        required: true
 
 permissions:
   contents: read
+
+# Host IPs are stored once as repository variables and resolved by the
+# selected cloud, so you never have to type them in.
+#   azure -> AZURE_APP_HOST / AZURE_DB_HOST / AZURE_DB_PRIVATE_IP
+#   aws   -> AWS_APP_HOST   / AWS_DB_HOST   / AWS_DB_PRIVATE_IP
+env:
+  SSH_USER: ${{ inputs.cloud == 'aws' && 'ubuntu' || 'azureuser' }}
+  APP_HOST: ${{ inputs.cloud == 'aws' && vars.AWS_APP_HOST || vars.AZURE_APP_HOST }}
+  DB_HOST: ${{ inputs.cloud == 'aws' && vars.AWS_DB_HOST || vars.AZURE_DB_HOST }}
+  DB_PRIVATE_IP: ${{ inputs.cloud == 'aws' && vars.AWS_DB_PRIVATE_IP || vars.AZURE_DB_PRIVATE_IP }}
 
 jobs:
   # 1) Compile and package the Spring Boot backend, publish the JAR as an artifact.
@@ -72,20 +73,18 @@ jobs:
       - name: Generate inventory
         working-directory: ansible
         run: |
-          ssh_user=azureuser
-          if [ "${{ inputs.cloud }}" = "aws" ]; then ssh_user=ubuntu; fi
           mkdir -p inventory
           cat > inventory/hosts.ini <<EOF
           [app]
-          app-server ansible_host=${{ inputs.app_host }}
+          app-server ansible_host=${APP_HOST}
 
           [db]
-          db-server ansible_host=${{ inputs.db_host }}
+          db-server ansible_host=${DB_HOST}
 
           [all:vars]
-          ansible_user=${ssh_user}
+          ansible_user=${SSH_USER}
           ansible_ssh_common_args=-o StrictHostKeyChecking=no
-          db_private_ip=${{ inputs.db_private_ip }}
+          db_private_ip=${DB_PRIVATE_IP}
           mysql_database=erp
           mysql_app_user=erp_app
           EOF
@@ -93,7 +92,7 @@ jobs:
       - name: Wait for SSH on DB host
         run: |
           for i in $(seq 1 30); do
-            if nc -z -w 5 ${{ inputs.db_host }} 22; then
+            if nc -z -w 5 ${DB_HOST} 22; then
               echo "SSH reachable on DB host"; exit 0
             fi
             echo "waiting for SSH... ($i)"; sleep 10
@@ -135,20 +134,18 @@ jobs:
       - name: Generate inventory
         working-directory: ansible
         run: |
-          ssh_user=azureuser
-          if [ "${{ inputs.cloud }}" = "aws" ]; then ssh_user=ubuntu; fi
           mkdir -p inventory
           cat > inventory/hosts.ini <<EOF
           [app]
-          app-server ansible_host=${{ inputs.app_host }}
+          app-server ansible_host=${APP_HOST}
 
           [db]
-          db-server ansible_host=${{ inputs.db_host }}
+          db-server ansible_host=${DB_HOST}
 
           [all:vars]
-          ansible_user=${ssh_user}
+          ansible_user=${SSH_USER}
           ansible_ssh_common_args=-o StrictHostKeyChecking=no
-          db_private_ip=${{ inputs.db_private_ip }}
+          db_private_ip=${DB_PRIVATE_IP}
           mysql_database=erp
           mysql_app_user=erp_app
           EOF
@@ -156,7 +153,7 @@ jobs:
       - name: Wait for SSH on app host
         run: |
           for i in $(seq 1 30); do
-            if nc -z -w 5 ${{ inputs.app_host }} 22; then
+            if nc -z -w 5 ${APP_HOST} 22; then
               echo "SSH reachable on app host"; exit 0
             fi
             echo "waiting for SSH... ($i)"; sleep 10
@@ -182,7 +179,7 @@ jobs:
       - name: Check actuator health
         run: |
           for i in $(seq 1 12); do
-            body=$(curl -fsS "http://${{ inputs.app_host }}/actuator/health" || true)
+            body=$(curl -fsS "http://${APP_HOST}/actuator/health" || true)
             echo "attempt $i: $body"
             if echo "$body" | grep -q '"status":"UP"'; then
               echo "App is healthy"; exit 0
