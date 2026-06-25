@@ -43,7 +43,7 @@
 
     - name: Copy backend JAR
       ansible.builtin.copy:
-        src: "files/{{ jar_name }}"
+        src: "../files/{{ jar_name }}"
         dest: "{{ app_dir }}/{{ jar_name }}"
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
@@ -52,7 +52,7 @@
 
     - name: Install systemd unit for the backend
       ansible.builtin.template:
-        src: templates/erp-backend.service.j2
+        src: ../templates/erp-backend.service.j2
         dest: /etc/systemd/system/erp-backend.service
         mode: "0644"
       notify:
@@ -61,7 +61,7 @@
 
     - name: Configure nginx reverse proxy
       ansible.builtin.template:
-        src: templates/nginx-erp.conf.j2
+        src: ../templates/nginx-erp.conf.j2
         dest: /etc/nginx/sites-available/erp.conf
         mode: "0644"
       notify: Restart nginx
