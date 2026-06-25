@@ -1,0 +1,67 @@
+# ===========================================================================
+# Default profile = "dev": uses an in-memory H2 database so the app boots
+# with zero setup (great for local development). Production uses "prod".
+# ===========================================================================
+spring:
+  application:
+    name: erp-system
+  profiles:
+    active: dev
+
+# Actuator: expose health + Prometheus metrics so Datadog (prod) and
+# Grafana/Prometheus (dev) can scrape this app.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: erp-system
+
+server:
+  port: 8080
+
+---
+# --------------------------- DEV (H2 in-memory) ----------------------------
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    url: jdbc:h2:mem:erpdb;DB_CLOSE_DELAY=-1;MODE=MySQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+    show-sql: false
+  h2:
+    console:
+      enabled: true
+
+---
+# --------------------------- PROD (MySQL) ----------------------------------
+# All values come from environment variables so no secrets live in the repo.
+spring:
+  config:
+    activate:
+      on-profile: prod
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:erpdb}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${DB_USER:erp_user}
+    password: ${DB_PASSWORD:changeme}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+    show-sql: false
